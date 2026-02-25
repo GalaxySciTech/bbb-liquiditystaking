@@ -2,6 +2,8 @@
 
 XDC Liquid Staking Protocol — a Lido-style staking system aligned with **Spec v1.5** and **XDC 2.0 Staking, Rewards and Burning Upgrade**. Users stake XDC to receive liquid bXDC tokens. Operators run masternodes across Core/Protector/Observer tiers to earn rewards, which automatically increase bXDC value.
 
+📄 **[Technical Specification (xdc-liquid-staking-spec-v1.5.docx)](xdc-liquid-staking-spec-v1.5.docx)**
+
 ## Design Principles (Spec v1.5)
 
 - **Scale-first**: Deploy masternodes across all tiers. Observer Nodes are the growth engine.
