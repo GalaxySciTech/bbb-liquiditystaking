@@ -129,6 +129,12 @@ contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
         _grantRole(MASTERNODE_MANAGER_ROLE, address(masternodeManager));
     }
 
+    /// @dev 仅用于测试：在 Hardhat 网络设置 instantExitBuffer，便于构造 NFT 赎回路径
+    function setInstantExitBufferForTesting(uint256 value) external {
+        require(block.chainid == 31337, "Test only");
+        instantExitBuffer = value;
+    }
+
     function getBufferHealthPercent() public view returns (uint256) {
         if (totalPooledXDC == 0) return 100;
         return (instantExitBuffer * 100) / totalPooledXDC;

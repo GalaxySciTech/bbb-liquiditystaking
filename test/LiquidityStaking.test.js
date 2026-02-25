@@ -116,27 +116,19 @@ describe("XDC Liquidity Staking", function () {
         });
 
         it("大额 withdraw 超出 buffer 时应铸造 NFT", async function () {
-            // 构造 buffer < 赎回量的场景：user1 有 100 bXDC，buffer 仅 50
             await stakingPool.connect(user1).stake({ value: ethers.utils.parseEther("100") });
-            await stakingPool.connect(user2).stake({ value: ethers.utils.parseEther("50") });
-            await stakingPool.connect(user1).withdraw(ethers.utils.parseEther("50")); // buffer=100, user1=50 bXDC
-            await stakingPool.connect(user2).withdraw(ethers.utils.parseEther("50")); // buffer=50, user2=0
-            await stakingPool.connect(user1).stake({ value: ethers.utils.parseEther("50") }); // buffer=100, user1=100 bXDC
-            await stakingPool.connect(user2).stake({ value: ethers.utils.parseEther("50") }); // buffer=150
-            await stakingPool.connect(user1).withdraw(ethers.utils.parseEther("50")); // buffer=100, user1=50 bXDC
-            await stakingPool.connect(user2).withdraw(ethers.utils.parseEther("50")); // buffer=50
-            await stakingPool.connect(user1).stake({ value: ethers.utils.parseEther("50") }); // buffer=100, user1=100 bXDC
-            await stakingPool.connect(user2).withdraw(ethers.utils.parseEther("50")); // buffer=50, user2=0
-            // 此时 buffer=50, user1 有 100 bXDC。赎回 80 > 50 -> NFT 路径
+            await stakingPool.connect(user1).withdraw(ethers.utils.parseEther("20")); // user1=80 bXDC
+            await stakingPool.connect(user1).stake({ value: ethers.utils.parseEther("1") }); // user1=81 bXDC
+            await stakingPool.setInstantExitBufferForTesting(ethers.utils.parseEther("80")); // buffer=80, 仅 Hardhat
             const batchIdBefore = await stakingPool.nextWithdrawalBatchId();
-            await stakingPool.connect(user1).withdraw(ethers.utils.parseEther("80"));
+            await stakingPool.connect(user1).withdraw(ethers.utils.parseEther("81")); // 81 > 80 -> NFT 路径
             const batchId = await stakingPool.nextWithdrawalBatchId();
             expect(batchId).to.equal(batchIdBefore + 1);
             expect(await withdrawalNFT.balanceOf(user1.address, batchId - 1)).to.equal(
-                ethers.utils.parseEther("80")
+                ethers.utils.parseEther("81")
             );
             const batch = await stakingPool.withdrawalBatches(batchId - 1);
-            expect(batch.xdcAmount).to.equal(ethers.utils.parseEther("80"));
+            expect(batch.xdcAmount).to.equal(ethers.utils.parseEther("81"));
             expect(batch.redeemed).to.equal(false);
         });
     });
