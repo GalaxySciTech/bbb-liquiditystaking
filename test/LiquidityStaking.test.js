@@ -114,6 +114,31 @@ describe("XDC Liquidity Staking", function () {
             // NFT 路径需 withdraw > instantExitBuffer（通常需 masternode 占用资金），此处仅验证结构
             expect(await stakingPool.nextWithdrawalBatchId()).to.equal(0);
         });
+
+        it("大额 withdraw 超出 buffer 时应铸造 NFT", async function () {
+            // 构造 buffer < 赎回量的场景：user1 有 100 bXDC，buffer 仅 50
+            await stakingPool.connect(user1).stake({ value: ethers.utils.parseEther("100") });
+            await stakingPool.connect(user2).stake({ value: ethers.utils.parseEther("50") });
+            await stakingPool.connect(user1).withdraw(ethers.utils.parseEther("50")); // buffer=100, user1=50 bXDC
+            await stakingPool.connect(user2).withdraw(ethers.utils.parseEther("50")); // buffer=50, user2=0
+            await stakingPool.connect(user1).stake({ value: ethers.utils.parseEther("50") }); // buffer=100, user1=100 bXDC
+            await stakingPool.connect(user2).stake({ value: ethers.utils.parseEther("50") }); // buffer=150
+            await stakingPool.connect(user1).withdraw(ethers.utils.parseEther("50")); // buffer=100, user1=50 bXDC
+            await stakingPool.connect(user2).withdraw(ethers.utils.parseEther("50")); // buffer=50
+            await stakingPool.connect(user1).stake({ value: ethers.utils.parseEther("50") }); // buffer=100, user1=100 bXDC
+            await stakingPool.connect(user2).withdraw(ethers.utils.parseEther("50")); // buffer=50, user2=0
+            // 此时 buffer=50, user1 有 100 bXDC。赎回 80 > 50 -> NFT 路径
+            const batchIdBefore = await stakingPool.nextWithdrawalBatchId();
+            await stakingPool.connect(user1).withdraw(ethers.utils.parseEther("80"));
+            const batchId = await stakingPool.nextWithdrawalBatchId();
+            expect(batchId).to.equal(batchIdBefore + 1);
+            expect(await withdrawalNFT.balanceOf(user1.address, batchId - 1)).to.equal(
+                ethers.utils.parseEther("80")
+            );
+            const batch = await stakingPool.withdrawalBatches(batchId - 1);
+            expect(batch.xdcAmount).to.equal(ethers.utils.parseEther("80"));
+            expect(batch.redeemed).to.equal(false);
+        });
     });
 
     describe("KYC", function () {
