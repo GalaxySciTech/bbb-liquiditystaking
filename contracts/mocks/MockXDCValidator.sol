@@ -8,6 +8,10 @@ pragma solidity ^0.8.20;
 contract MockXDCValidator {
     uint256 public minCandidateCap = 10_000_000 ether;
     uint256 public minVoterCap = 1 ether;
+
+    function setMinCandidateCap(uint256 _cap) external {
+        minCandidateCap = _cap;
+    }
     uint256 public candidateWithdrawDelay = 1_296_000;
     uint256 public voterWithdrawDelay = 1_296_000;
 

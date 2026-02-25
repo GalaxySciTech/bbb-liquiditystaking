@@ -326,7 +326,8 @@ contract OperatorRegistry is AccessControl {
             // Compare as cross-multiply to avoid decimals: a/b < c/d ⟺ a*d < c*b
             uint256 num = info.activeMasternodes;
             uint256 den = info.maxMasternodes;
-            if (num * bestDenominator < bestNumerator * den) {
+            bool isBetter = operatorAdmin == address(0) || (num * bestDenominator < bestNumerator * den);
+            if (isBetter) {
                 bestNumerator = num;
                 bestDenominator = den;
                 operatorAdmin = op;

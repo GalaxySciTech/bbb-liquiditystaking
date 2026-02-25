@@ -1,25 +1,27 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 
-describe("XDC Liquidity Staking V2", function () {
+describe("XDC Liquidity Staking", function () {
     let stakingPool;
     let bxdc;
+    let wxdc;
     let withdrawalNFT;
     let operatorRegistry;
     let mockValidator;
     let owner;
     let user1;
     let user2;
+    let user3;
 
     beforeEach(async function () {
-        [owner, user1, user2] = await ethers.getSigners();
+        [owner, user1, user2, user3] = await ethers.getSigners();
 
         const MockXDCValidator = await ethers.getContractFactory("MockXDCValidator");
         mockValidator = await MockXDCValidator.deploy();
         await mockValidator.deployed();
 
         const WXDC = await ethers.getContractFactory("WXDC");
-        const wxdc = await WXDC.deploy();
+        wxdc = await WXDC.deploy();
         await wxdc.deployed();
 
         const XDCLiquidityStaking = await ethers.getContractFactory("XDCLiquidityStaking");
@@ -141,6 +143,188 @@ describe("XDC Liquidity Staking V2", function () {
             const coinbase = "0x1234567890123456789012345678901234567890";
             await operatorRegistry.connect(user1).whitelistCoinbase(coinbase);
             expect(await operatorRegistry.coinbaseToOperator(coinbase)).to.equal(user1.address);
+        });
+    });
+
+    describe("deposit (WXDC)", function () {
+        it("应允许用户通过 WXDC deposit 获得 bXDC", async function () {
+            await stakingPool.connect(owner).stake({ value: ethers.utils.parseEther("1") });
+            const amount = ethers.utils.parseEther("100");
+            await wxdc.connect(user1).deposit({ value: amount });
+            await wxdc.connect(user1).approve(stakingPool.address, amount);
+
+            const shares = await stakingPool.connect(user1).callStatic.deposit(amount, user1.address);
+            await stakingPool.connect(user1).deposit(amount, user1.address);
+
+            expect(await bxdc.balanceOf(user1.address)).to.equal(shares);
+            expect(await stakingPool.totalPooledXDC()).to.equal(ethers.utils.parseEther("101"));
+        });
+
+        it("deposit 应拒绝低于最小数量", async function () {
+            const smallAmount = ethers.utils.parseEther("0.5");
+            await wxdc.connect(user1).deposit({ value: smallAmount });
+            await wxdc.connect(user1).approve(stakingPool.address, smallAmount);
+
+            await expect(
+                stakingPool.connect(user1).deposit(smallAmount, user1.address)
+            ).to.be.revertedWith("Amount below minimum");
+        });
+
+        it("deposit 可指定 receiver 为不同地址", async function () {
+            await stakingPool.connect(owner).stake({ value: ethers.utils.parseEther("1") });
+            const amount = ethers.utils.parseEther("50");
+            await wxdc.connect(user1).deposit({ value: amount });
+            await wxdc.connect(user1).approve(stakingPool.address, amount);
+
+            await stakingPool.connect(user1).deposit(amount, user2.address);
+            expect(await bxdc.balanceOf(user2.address)).to.be.gt(0);
+            expect(await bxdc.balanceOf(user1.address)).to.equal(0);
+        });
+    });
+
+    describe("mint (WXDC)", function () {
+        it("应允许用户通过 mint 指定 bXDC 数量", async function () {
+            await stakingPool.connect(owner).stake({ value: ethers.utils.parseEther("100") });
+            const shares = ethers.utils.parseEther("80");
+            const assetsNeeded = await stakingPool.getXDCBybXDC(shares);
+            await wxdc.connect(user1).deposit({ value: assetsNeeded });
+            await wxdc.connect(user1).approve(stakingPool.address, assetsNeeded);
+
+            await stakingPool.connect(user1).mint(shares, user1.address);
+            expect(await bxdc.balanceOf(user1.address)).to.equal(shares);
+        });
+    });
+
+    describe("redeem (即时赎回)", function () {
+        beforeEach(async function () {
+            await stakingPool.connect(user1).stake({ value: ethers.utils.parseEther("100") });
+        });
+
+        it("应允许通过 redeem 即时赎回 shares", async function () {
+            const shares = ethers.utils.parseEther("20");
+            const balanceBefore = await ethers.provider.getBalance(user1.address);
+
+            const tx = await stakingPool.connect(user1).redeem(shares, user1.address, user1.address);
+            const receipt = await tx.wait();
+            const gasUsed = receipt.gasUsed.mul(receipt.effectiveGasPrice);
+            const balanceAfter = await ethers.provider.getBalance(user1.address);
+
+            expect(balanceAfter).to.equal(balanceBefore.add(ethers.utils.parseEther("20")).sub(gasUsed));
+            expect(await bxdc.balanceOf(user1.address)).to.equal(ethers.utils.parseEther("80"));
+        });
+
+        it("redeem 可指定 receiver 为不同地址", async function () {
+            const shares = ethers.utils.parseEther("10");
+            const balanceBefore = await ethers.provider.getBalance(user2.address);
+
+            await stakingPool.connect(user1).redeem(shares, user2.address, user1.address);
+
+            expect(await ethers.provider.getBalance(user2.address)).to.equal(
+                balanceBefore.add(ethers.utils.parseEther("10"))
+            );
+            expect(await bxdc.balanceOf(user1.address)).to.equal(ethers.utils.parseEther("90"));
+        });
+
+        it("redeem 应拒绝低于 minWithdrawAmount", async function () {
+            const tinyShares = ethers.utils.parseEther("0.05");
+            await expect(
+                stakingPool.connect(user1).redeem(tinyShares, user1.address, user1.address)
+            ).to.be.revertedWith("Below min withdrawal");
+        });
+    });
+
+    describe("管理员功能", function () {
+        it("setTreasury 应仅 LSP admin 可调用", async function () {
+            await stakingPool.connect(owner).setTreasury(user2.address);
+            expect(await stakingPool.treasury()).to.equal(user2.address);
+
+            await expect(
+                stakingPool.connect(user1).setTreasury(user3.address)
+            ).to.be.reverted;
+        });
+
+        it("setTreasury 应拒绝零地址", async function () {
+            await expect(
+                stakingPool.connect(owner).setTreasury(ethers.constants.AddressZero)
+            ).to.be.revertedWith("Invalid treasury");
+        });
+
+        it("setRevenueSplit 必须总和为 100", async function () {
+            await stakingPool.connect(owner).setRevenueSplit(80, 15, 5);
+            expect(await stakingPool.bxdcShare()).to.equal(80);
+            expect(await stakingPool.operatorShare()).to.equal(15);
+            expect(await stakingPool.treasuryShare()).to.equal(5);
+
+            await expect(
+                stakingPool.connect(owner).setRevenueSplit(80, 15, 10)
+            ).to.be.revertedWith("Must sum to 100");
+        });
+
+        it("addToInstantExitBuffer 应仅 LSP admin 可调用", async function () {
+            await expect(
+                stakingPool.connect(user1).addToInstantExitBuffer({ value: ethers.utils.parseEther("10") })
+            ).to.be.reverted;
+        });
+
+        it("submitKYC 应仅 LSP admin 可调用", async function () {
+            await expect(
+                stakingPool.connect(user1).submitKYC("ipfs://hash")
+            ).to.be.reverted;
+        });
+    });
+
+    describe("视图函数", function () {
+        it("getExchangeRate 质押后应为 1:1", async function () {
+            await stakingPool.connect(user1).stake({ value: ethers.utils.parseEther("100") });
+            expect(await stakingPool.getExchangeRate()).to.equal(ethers.utils.parseEther("1"));
+        });
+
+        it("getbXDCByXDC 和 getXDCBybXDC 应正确转换", async function () {
+            const xdcAmount = ethers.utils.parseEther("100");
+            const shares = await stakingPool.getbXDCByXDC(xdcAmount);
+            const backToXdc = await stakingPool.getXDCBybXDC(shares);
+            expect(backToXdc).to.equal(xdcAmount);
+        });
+
+        it("getAvailableBalance 应反映合约余额", async function () {
+            await stakingPool.connect(user1).stake({ value: ethers.utils.parseEther("50") });
+            expect(await stakingPool.getAvailableBalance()).to.equal(ethers.utils.parseEther("50"));
+        });
+
+        it("getBufferHealthPercent 无质押时应为 100", async function () {
+            expect(await stakingPool.getBufferHealthPercent()).to.equal(100);
+        });
+    });
+
+    describe("withdraw 边界", function () {
+        it("应拒绝 withdraw 低于 minWithdrawAmount", async function () {
+            await stakingPool.connect(user1).stake({ value: ethers.utils.parseEther("100") });
+            const tinyShares = ethers.utils.parseEther("0.05");
+            await expect(
+                stakingPool.connect(user1).withdraw(tinyShares)
+            ).to.be.revertedWith("Below min withdrawal");
+        });
+
+        it("应拒绝 withdraw 超过余额", async function () {
+            await stakingPool.connect(user1).stake({ value: ethers.utils.parseEther("100") });
+            await expect(
+                stakingPool.connect(user1).withdraw(ethers.utils.parseEther("150"))
+            ).to.be.revertedWith("Insufficient bXDC");
+        });
+
+        it("应拒绝 withdraw 零数量", async function () {
+            await expect(
+                stakingPool.connect(user1).withdraw(0)
+            ).to.be.revertedWith("Amount must be > 0");
+        });
+    });
+
+
+    describe("Revenue split 默认值", function () {
+        it("初始应为 90/7/3", async function () {
+            expect(await stakingPool.bxdcShare()).to.equal(90);
+            expect(await stakingPool.operatorShare()).to.equal(7);
+            expect(await stakingPool.treasuryShare()).to.equal(3);
         });
     });
 });
