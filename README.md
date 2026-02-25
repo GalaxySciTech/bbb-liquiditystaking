@@ -54,14 +54,14 @@ npx hardhat test
 ```bash
 yarn deploy:xdctestnet
 # or
-npx hardhat run scripts/liquidityStakingV2Deploy.js --network xdctestnet
+npx hardhat run scripts/liquidityStakingDeploy.js --network xdctestnet
 ```
 
 **Mainnet (xdc):**
 ```bash
 yarn deploy:xdc
 # or
-npx hardhat run scripts/liquidityStakingV2Deploy.js --network xdc
+npx hardhat run scripts/liquidityStakingDeploy.js --network xdc
 ```
 
 ---
@@ -106,7 +106,7 @@ bbb-liquiditystaking/
 
 ---
 
-## V2 Post-Deployment Configuration
+## Post-Deployment Configuration
 
 1. **OperatorRegistry**: `registerOperator(admin, maxMasternodes)`, `approveKYC(admin, kycHash)` — stores kycHash for vault delegation
 2. **Operators**: `whitelistCoinbase(coinbase)` for each masternode
@@ -280,7 +280,7 @@ A: Yes. bXDC is ERC-4626 compatible and can be used in DeFi.
 
 ```bash
 # Deploy
-npx hardhat run scripts/liquidityStakingV2Deploy.js --network xdc
+npx hardhat run scripts/liquidityStakingDeploy.js --network xdc
 
 # Admin tool
 STAKING_POOL_ADDRESS=0x... npx hardhat run scripts/liquidityStakingAdmin.js --network xdc

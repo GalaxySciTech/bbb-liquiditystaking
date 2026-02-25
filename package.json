@@ -5,8 +5,8 @@
   "scripts": {
     "compile": "hardhat compile",
     "test": "hardhat test",
-    "deploy:xdctestnet": "hardhat run scripts/liquidityStakingV2Deploy.js --network xdctestnet",
-    "deploy:xdc": "hardhat run scripts/liquidityStakingV2Deploy.js --network xdc"
+    "deploy:xdctestnet": "hardhat run scripts/liquidityStakingDeploy.js --network xdctestnet",
+    "deploy:xdc": "hardhat run scripts/liquidityStakingDeploy.js --network xdc"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-network-helpers": "^1.0.9",
