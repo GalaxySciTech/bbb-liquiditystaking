@@ -53,7 +53,7 @@ async function main() {
 
     console.log("\nV2 Setup (Spec v1.3):");
     console.log("1. LSP admin: submitKYC(kycHash)");
-    console.log("2. OperatorRegistry: registerOperator(admin, maxMasternodes), approveKYC(admin)");
+    console.log("2. OperatorRegistry: registerOperator(admin, maxMasternodes), approveKYC(admin, kycHash)");
     console.log("3. Operators: whitelistCoinbase(coinbase) for each masternode");
     console.log("4. Users stake() -> bXDC. MasternodeManager auto-proposes when buffer healthy");
     console.log("5. Keeper: harvestRewards() collects from vaults, splits 90/7/3");

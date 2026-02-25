@@ -188,7 +188,6 @@ contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
     }
 
     function deployAndPropose(address coinbase) external onlyRole(MASTERNODE_MANAGER_ROLE) nonReentrant whenNotPaused {
-        require(lspKYCSubmitted, "LSP must submit KYC first");
         require(operatorRegistry.coinbaseToVault(coinbase) == address(0), "Already proposed");
         require(!validator.isCandidate(coinbase), "Already candidate");
         require(address(this).balance >= masternodeStakeAmount, "Insufficient balance");
@@ -198,8 +197,11 @@ contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
         require(operator != address(0), "Coinbase not registered");
         require(operatorRegistry.isKYCValid(operator), "Operator KYC invalid");
 
+        string memory kycHash = operatorRegistry.getKycHash(operator);
+        require(bytes(kycHash).length > 0, "Operator KYC hash not set");
+
         address vault = vaultFactory.deployVault(address(this));
-        MasternodeVault(payable(vault)).propose{value: masternodeStakeAmount}(coinbase);
+        MasternodeVault(payable(vault)).setupAndPropose{value: masternodeStakeAmount}(kycHash, coinbase);
 
         activeVaults.push(vault);
         vaultToOperator[vault] = operator;

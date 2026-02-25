@@ -148,15 +148,16 @@ describe("XDC Liquidity Staking", function () {
             expect(info.maxMasternodes).to.equal(3);
         });
 
-        it("管理员应能批准 KYC", async function () {
+        it("管理员应能批准 KYC（含 kycHash 存储）", async function () {
             await operatorRegistry.connect(owner).registerOperator(user1.address, 3);
-            await operatorRegistry.connect(owner).approveKYC(user1.address);
+            await operatorRegistry.connect(owner).approveKYC(user1.address, "ipfs://operator-kyc-hash");
             expect(await operatorRegistry.isKYCValid(user1.address)).to.equal(true);
+            expect(await operatorRegistry.getKycHash(user1.address)).to.equal("ipfs://operator-kyc-hash");
         });
 
         it("Operator 应能 whitelist coinbase", async function () {
             await operatorRegistry.connect(owner).registerOperator(user1.address, 3);
-            await operatorRegistry.connect(owner).approveKYC(user1.address);
+            await operatorRegistry.connect(owner).approveKYC(user1.address, "ipfs://operator-kyc-hash");
             const coinbase = "0x1234567890123456789012345678901234567890";
             await operatorRegistry.connect(user1).whitelistCoinbase(coinbase);
             expect(await operatorRegistry.coinbaseToOperator(coinbase)).to.equal(user1.address);

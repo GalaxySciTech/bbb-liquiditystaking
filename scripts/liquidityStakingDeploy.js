@@ -76,7 +76,7 @@ async function main() {
 
     console.log("\n📖 使用说明:");
     console.log("1. LSP 管理员调用 submitKYC(kycHash) 提交 LSP KYC");
-    console.log("2. OperatorRegistry: registerOperator(admin, maxMasternodes), approveKYC(admin)");
+    console.log("2. OperatorRegistry: registerOperator(admin, maxMasternodes), approveKYC(admin, kycHash)");
     console.log("3. Operators: whitelistCoinbase(coinbase) 为每个 masternode 注册");
     console.log("4. 用户 stake() 质押 XDC -> 获得 bXDC，达到条件时自动部署 masternode vault");
     console.log("5. Keeper 调用 harvestRewards() 收取奖励并分配");

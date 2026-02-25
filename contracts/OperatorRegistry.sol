@@ -41,6 +41,7 @@ contract OperatorRegistry is AccessControl {
         address adminAddress;
         bool kycApproved;
         uint256 kycExpiryTimestamp;
+        string kycHash; // Stored for vault delegation: vault calls uploadKYC(kycHash) before propose()
         uint256 maxMasternodes;
         uint256 activeMasternodes;
         bool exists;
@@ -101,6 +102,7 @@ contract OperatorRegistry is AccessControl {
             adminAddress: operatorAdmin,
             kycApproved: false,
             kycExpiryTimestamp: 0,
+            kycHash: "",
             maxMasternodes: maxMasternodes,
             activeMasternodes: 0,
             exists: true
@@ -110,12 +112,16 @@ contract OperatorRegistry is AccessControl {
     }
 
     /**
-     * @dev Approve or renew KYC for an operator. Sets expiry to now + 365 days.
+     * @dev Approve or renew KYC for an operator. Stores kycHash for vault delegation.
+     * When StakingPool deploys a vault for this operator's coinbase, it passes kycHash
+     * to vault.setupAndPropose(). Sets expiry to now + 365 days.
      */
-    function approveKYC(address operatorAdmin) external onlyRole(OPERATOR_ADMIN_ROLE) {
+    function approveKYC(address operatorAdmin, string calldata kycHash) external onlyRole(OPERATOR_ADMIN_ROLE) {
         require(operators[operatorAdmin].exists, "Not registered");
+        require(bytes(kycHash).length > 0, "KYC hash required");
         operators[operatorAdmin].kycApproved = true;
         operators[operatorAdmin].kycExpiryTimestamp = block.timestamp + KYC_VALID_DURATION;
+        operators[operatorAdmin].kycHash = kycHash;
         emit KYCApproved(operatorAdmin, operators[operatorAdmin].kycExpiryTimestamp);
     }
 
@@ -126,7 +132,16 @@ contract OperatorRegistry is AccessControl {
         require(operators[operatorAdmin].exists, "Not registered");
         operators[operatorAdmin].kycApproved = false;
         operators[operatorAdmin].kycExpiryTimestamp = 0;
+        delete operators[operatorAdmin].kycHash;
         emit KYCRevoked(operatorAdmin);
+    }
+
+    /**
+     * @dev Returns the stored KYC hash for vault delegation. Used by StakingPool
+     * when calling vault.setupAndPropose(kycHash, coinbase).
+     */
+    function getKycHash(address operatorAdmin) external view returns (string memory) {
+        return operators[operatorAdmin].kycHash;
     }
 
     /**

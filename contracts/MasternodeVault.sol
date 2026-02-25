@@ -41,9 +41,21 @@ contract MasternodeVault {
     }
 
     /**
-     * @dev Propose coinbase as masternode candidate on XDC validator (0x88).
-     * Sends masternodeStakeAmount XDC forwarded from StakingPool.
-     * This vault becomes the masternode owner — future epoch rewards arrive here.
+     * @dev One-time setup: upload operator's KYC hash to 0x88, then propose coinbase.
+     * Per spec v1.5 — KYC delegation: vault reuses operator's kycHash from OperatorRegistry.
+     * Each vault needs uploadKYC() before propose() to pass onlyKYCWhitelisted on 0x88.
+     * @param kycHash Operator's KYC hash (from OperatorRegistry.getKycHash)
+     * @param coinbase Masternode coinbase/validator key address
+     */
+    function setupAndPropose(string calldata kycHash, address coinbase) external payable onlyStakingPool {
+        require(bytes(kycHash).length > 0, "KYC hash required");
+        VALIDATOR.uploadKYC(kycHash);
+        VALIDATOR.propose{value: msg.value}(coinbase);
+    }
+
+    /**
+     * @dev Legacy propose (no KYC). Use setupAndPropose for new deployments.
+     * Kept for backward compatibility when vault already has KYC via ownerToCandidate.
      */
     function propose(address coinbase) external payable onlyStakingPool {
         VALIDATOR.propose{value: msg.value}(coinbase);
