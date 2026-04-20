@@ -16,6 +16,8 @@ import "./MasternodeManager.sol";
 import "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import "./bXDC.sol";
 import "./WithdrawalRequestNFT.sol";
+import "./WithdrawalManager.sol";
+import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
 /**
  * @title XDCLiquidityStaking
@@ -30,6 +32,7 @@ contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
     bXDC public bxdcToken;
     WXDC public wxdc;
     WithdrawalRequestNFT public withdrawalNFT;
+    WithdrawalManager public withdrawalManager;
     MasternodeVaultFactory public vaultFactory;
     OperatorRegistry public operatorRegistry;
     RevenueDistributor public revenueDistributor;
@@ -52,10 +55,10 @@ contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
     mapping(address => address) public vaultToCoinbase;
     mapping(address => address) public coinbaseToVault;
 
-    mapping(uint256 => WithdrawalBatch) public withdrawalBatches;
+    mapping(uint256 => WithdrawalTicket) public withdrawalTickets;
     mapping(address => uint256[]) public userWithdrawalBatches;
 
-    struct WithdrawalBatch {
+    struct WithdrawalTicket {
         uint256 xdcAmount;
         uint256 unlockBlock;
         bool redeemed;
@@ -136,6 +139,17 @@ contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
         instantExitBuffer = value;
     }
 
+    /// @dev 仅用于测试：缩短延迟赎回解锁区块
+    function setWithdrawDelayBlocksForTesting(uint256 value) external {
+        require(block.chainid == 31337, "Test only");
+        withdrawDelayBlocks = value;
+    }
+
+    /// @dev Keeper: FIFO fulfill mature withdrawal tickets (delegates to WithdrawalManager).
+    function processWithdrawalQueue(uint256 maxItems) external returns (uint256 processed) {
+        return withdrawalManager.processWithdrawalQueue(maxItems);
+    }
+
     function getBufferHealthPercent() public view returns (uint256) {
         if (totalPooledXDC == 0) return 100;
         return (instantExitBuffer * 100) / totalPooledXDC;
@@ -168,6 +182,12 @@ contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
     function setTreasury(address _treasury) external onlyRole(LSP_ADMIN_ROLE) {
         require(_treasury != address(0), "Invalid treasury");
         treasury = _treasury;
+    }
+
+    /// @dev Deploy WithdrawalManager off-chain or via script, then wire here (keeps StakingPool initcode small).
+    function setWithdrawalManager(address _withdrawalManager) external onlyRole(LSP_ADMIN_ROLE) {
+        require(_withdrawalManager != address(0), "Invalid WithdrawalManager");
+        withdrawalManager = WithdrawalManager(_withdrawalManager);
     }
 
     function setRevenueSplit(uint256 _bxdc, uint256 _operator, uint256 _treasury) external onlyRole(LSP_ADMIN_ROLE) {
@@ -407,7 +427,8 @@ contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
     }
 
     function _tryAutoDeployMasternode() internal {
-        if (!lspKYCSubmitted || address(this).balance < masternodeStakeAmount) return;
+        // Operator KYC gates deploy in deployAndPropose; no separate LSP KYC required for auto-scale
+        if (address(this).balance < masternodeStakeAmount) return;
         if (getBufferHealthPercent() < minBufferPercent) return;
         masternodeManager.selectAndPropose();
     }
@@ -427,17 +448,19 @@ contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
             require(ok, "Transfer failed");
             emit InstantExit(msg.sender, xdcAmount);
         } else {
-            uint256 batchId = nextWithdrawalBatchId++;
+            uint256 ticketId = nextWithdrawalBatchId++;
             uint256 unlockBlock = block.number + withdrawDelayBlocks;
-            withdrawalBatches[batchId] = WithdrawalBatch({
+            withdrawalTickets[ticketId] = WithdrawalTicket({
                 xdcAmount: xdcAmount,
                 unlockBlock: unlockBlock,
                 redeemed: false
             });
             totalInUnbonding += xdcAmount;
-            userWithdrawalBatches[msg.sender].push(batchId);
-            withdrawalNFT.mint(msg.sender, batchId, xdcAmount);
-            emit WithdrawalNFTMinted(batchId, msg.sender, xdcAmount);
+            userWithdrawalBatches[msg.sender].push(ticketId);
+            withdrawalNFT.mint(msg.sender, ticketId);
+            require(address(withdrawalManager) != address(0), "WithdrawalManager not set");
+            withdrawalManager.enqueue(ticketId);
+            emit WithdrawalNFTMinted(ticketId, msg.sender, xdcAmount);
         }
     }
 
@@ -462,20 +485,34 @@ contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
         return assets;
     }
 
-    function redeemWithdrawal(uint256 batchId) external nonReentrant {
-        WithdrawalBatch storage batch = withdrawalBatches[batchId];
-        require(!batch.redeemed, "Already redeemed");
-        require(block.number >= batch.unlockBlock, "Still unbonding");
-        uint256 amount = withdrawalNFT.balanceOf(msg.sender, batchId);
-        require(amount >= batch.xdcAmount, "Insufficient NFT balance");
-
-        batch.redeemed = true;
-        totalInUnbonding -= batch.xdcAmount;
-        withdrawalNFT.burn(msg.sender, batchId, batch.xdcAmount);
-
-        (bool ok, ) = payable(msg.sender).call{value: batch.xdcAmount}("");
+    /**
+     * @dev Pay out one ticket when FIFO + maturity + buffer (called by WithdrawalManager only).
+     */
+    function payoutWithdrawalTicket(uint256 ticketId) external nonReentrant returns (uint256 paid) {
+        require(address(withdrawalManager) != address(0), "WithdrawalManager not set");
+        require(msg.sender == address(withdrawalManager), "Only WithdrawalManager");
+        WithdrawalTicket storage t = withdrawalTickets[ticketId];
+        require(!t.redeemed, "Already redeemed");
+        require(block.number >= t.unlockBlock, "Still unbonding");
+        paid = t.xdcAmount;
+        require(paid > 0, "Invalid ticket");
+        if (instantExitBuffer < paid) {
+            return 0;
+        }
+        address holder = IERC721(address(withdrawalNFT)).ownerOf(ticketId);
+        t.redeemed = true;
+        totalInUnbonding -= paid;
+        instantExitBuffer -= paid;
+        withdrawalNFT.burn(ticketId);
+        (bool ok, ) = payable(holder).call{value: paid}("");
         require(ok, "Transfer failed");
-        emit WithdrawalRedeemed(batchId, msg.sender, batch.xdcAmount);
+        emit WithdrawalRedeemed(ticketId, holder, paid);
+    }
+
+    /// @dev Holder claims when their ticket is at FIFO head (delegates to WithdrawalManager).
+    function claimWithdrawalHead(uint256 ticketId) external nonReentrant {
+        require(address(withdrawalManager) != address(0), "WithdrawalManager not set");
+        withdrawalManager.claimIfHead(ticketId);
     }
 
     /// @dev Accepts native XDC from stake(), addToInstantExitBuffer, and vault forwards (principal after withdraw).

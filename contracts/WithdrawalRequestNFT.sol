@@ -2,37 +2,22 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/AccessControl.sol";
-import "@openzeppelin/contracts/token/ERC1155/extensions/ERC1155Supply.sol";
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 
 /**
  * @title WithdrawalRequestNFT
- * @dev ERC-1155 NFT representing a withdrawal claim during unbonding period.
- * Token ID = batchId. Amount = XDC owed. Transferable — enables secondary market for claims.
+ * @dev ERC-721 claim for delayed exits (spec v1.5). One token per ticketId; transferable.
  */
-contract WithdrawalRequestNFT is ERC1155Supply, AccessControl {
+contract WithdrawalRequestNFT is ERC721, AccessControl {
     bytes32 public constant STAKING_POOL_ROLE = keccak256("STAKING_POOL_ROLE");
+
     address public stakingPool;
 
-    modifier onlyStakingPool() {
-        require(msg.sender == stakingPool, "Only staking pool");
-        _;
-    }
-
-    constructor(address admin_) ERC1155("") {
+    constructor(address admin_) ERC721("XDC Withdrawal Request", "wXDC-EXIT") {
         _grantRole(DEFAULT_ADMIN_ROLE, admin_);
     }
 
-    function supportsInterface(
-        bytes4 interfaceId
-    ) public view override(ERC1155, AccessControl) returns (bool) {
-        return
-            ERC1155.supportsInterface(interfaceId) ||
-            AccessControl.supportsInterface(interfaceId);
-    }
-
-    function setStakingPool(
-        address _pool
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setStakingPool(address _pool) external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(_pool != address(0), "Invalid address");
         address old = stakingPool;
         stakingPool = _pool;
@@ -43,23 +28,19 @@ contract WithdrawalRequestNFT is ERC1155Supply, AccessControl {
 
     event StakingPoolSet(address indexed stakingPool);
 
-    function mint(
-        address to,
-        uint256 id,
-        uint256 amount
-    ) external onlyStakingPool {
-        _mint(to, id, amount, "");
+    function mint(address to, uint256 tokenId) external onlyRole(STAKING_POOL_ROLE) {
+        _mint(to, tokenId);
     }
 
-    function burn(
-        address from,
-        uint256 id,
-        uint256 amount
-    ) external onlyStakingPool {
-        _burn(from, id, amount);
+    function burn(uint256 tokenId) external onlyRole(STAKING_POOL_ROLE) {
+        _burn(tokenId);
     }
 
-    function uri(uint256) public pure override returns (string memory) {
+    function supportsInterface(bytes4 interfaceId) public view override(ERC721, AccessControl) returns (bool) {
+        return ERC721.supportsInterface(interfaceId) || AccessControl.supportsInterface(interfaceId);
+    }
+
+    function tokenURI(uint256) public pure override returns (string memory) {
         return "ipfs://withdrawal-request";
     }
 }

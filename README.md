@@ -209,7 +209,7 @@ await stakingPool.redeem(shares, receiver, owner);
 ### User: Redeem Delayed Withdrawal NFT
 
 ```javascript
-await stakingPool.redeemWithdrawal(batchId);
+await stakingPool.processWithdrawalQueue(10); // keeper FIFO, or claimWithdrawalHead(ticketId) when head
 ```
 
 ### Keeper: Harvest Rewards
