@@ -11,6 +11,8 @@ interface IXDCValidator {
     function vote(address _candidate) external payable;
     function unvote(address _candidate, uint256 _cap) external;
     function resign(address _candidate) external;
+    /// @dev After candidateWithdrawDelay, owner reclaims principal from withdrawsState (spec v1.5)
+    function withdraw(uint256 _blockNumber, uint256 _index) external;
     function uploadKYC(string calldata kycHash) external;
 
     function minCandidateCap() external view returns (uint256);
@@ -26,3 +28,4 @@ interface IXDCValidator {
     /// Note: XDCValidator uses KYCString[addr]; if getHashCount not available, use adapter
     function getHashCount(address _addr) external view returns (uint256);
 }
+

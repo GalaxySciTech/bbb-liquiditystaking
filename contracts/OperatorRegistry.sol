@@ -280,6 +280,13 @@ contract OperatorRegistry is AccessControl {
     }
 
     /**
+     * @dev Spec v1.5: new masternode proposals only when KYC is VALID (not during 30d WARNING window).
+     */
+    function canProposeNewMasternode(address operatorAdmin) external view returns (bool) {
+        return getKYCStatus(operatorAdmin) == KYCStatus.VALID;
+    }
+
+    /**
      * @dev Returns all registered coinbase addresses for an operator.
      */
     function getCoinbases(address operatorAdmin) external view returns (address[] memory) {
@@ -323,7 +330,8 @@ contract OperatorRegistry is AccessControl {
             if (!info.exists) continue;
 
             KYCStatus status = getKYCStatus(op);
-            if (status != KYCStatus.VALID && status != KYCStatus.WARNING) continue;
+            // Spec v1.5: new proposals only for VALID (not WARNING window)
+            if (status != KYCStatus.VALID) continue;
             if (info.activeMasternodes >= info.maxMasternodes) continue;
 
             // Find an unproposed coinbase

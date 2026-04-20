@@ -7,6 +7,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./interfaces/IXDCValidator.sol";
+import "./interfaces/IValidatorResignView.sol";
 import "./WXDC.sol";
 import "./MasternodeVault.sol";
 import "./MasternodeVaultFactory.sol";
@@ -19,8 +20,7 @@ import "./WithdrawalRequestNFT.sol";
 
 /**
  * @title XDCLiquidityStaking
- * @dev XDC Liquid Staking Protocol v1.3 - Per-vault reward isolation, OperatorRegistry, Revenue split
- * MasternodeVault per masternode. Harvest from each vault. Three-way revenue split.
+ * @dev XDC Liquid Staking Protocol — Spec v1.5: per-vault harvest, KYC delegation, resign + withdraw() principal.
  */
 contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
@@ -103,6 +103,7 @@ contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
     event VaultCollected(address indexed vault, address indexed coinbase, address indexed operator, uint256 amount);
     event CommissionAccrued(address indexed operator, uint256 amount);
     event CommissionRedirected(address indexed operator, uint256 amount, uint256 bxdcPortion, uint256 treasuryPortion);
+    event StakePrincipalReturned(address indexed vault, address indexed coinbase, uint256 amount);
 
     constructor(address _validator, address _wxdc, address _lspAdmin, address _treasury) {
         require(_validator != address(0), "Invalid validator");
@@ -110,6 +111,7 @@ contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
         require(_lspAdmin != address(0), "Invalid LSP admin");
         require(_treasury != address(0), "Invalid treasury");
         validator = IXDCValidator(_validator);
+        withdrawDelayBlocks = IXDCValidator(_validator).candidateWithdrawDelay();
         wxdc = WXDC(payable(_wxdc));
         treasury = _treasury;
         _grantRole(DEFAULT_ADMIN_ROLE, _lspAdmin);
@@ -119,7 +121,7 @@ contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
         bxdcToken.setStakingPool(address(this));
         withdrawalNFT = new WithdrawalRequestNFT(address(this));
         withdrawalNFT.setStakingPool(address(this));
-        vaultFactory = new MasternodeVaultFactory();
+        vaultFactory = new MasternodeVaultFactory(_validator);
         operatorRegistry = new OperatorRegistry(address(this));
         operatorRegistry.setStakingPool(address(this));
         operatorRegistry.grantRole(operatorRegistry.OPERATOR_ADMIN_ROLE(), _lspAdmin);
@@ -195,7 +197,7 @@ contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
 
         address operator = operatorRegistry.coinbaseToOperator(coinbase);
         require(operator != address(0), "Coinbase not registered");
-        require(operatorRegistry.isKYCValid(operator), "Operator KYC invalid");
+        require(operatorRegistry.canProposeNewMasternode(operator), "KYC warning: no new proposals");
 
         string memory kycHash = operatorRegistry.getKycHash(operator);
         require(bytes(kycHash).length > 0, "Operator KYC hash not set");
@@ -219,27 +221,55 @@ contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
         address vault = coinbaseToVault[coinbase];
         require(vault != address(0), "No vault");
         require(validator.isCandidate(coinbase), "Not candidate");
+        require(pendingResignAmount[vault] == 0, "Already resigning");
+
+        uint256 preRewards = MasternodeVault(payable(vault)).collectRewards();
+        if (preRewards > 0) {
+            address[] memory vaultArr = new address[](1);
+            uint256[] memory amtArr = new uint256[](1);
+            vaultArr[0] = vault;
+            amtArr[0] = preRewards;
+            address coinbase0 = vaultToCoinbase[vault];
+            address operator0 = vaultToOperator[vault];
+            emit VaultCollected(vault, coinbase0, operator0, preRewards);
+            _distributeHarvest(preRewards, vaultArr, amtArr, 1);
+        }
 
         MasternodeVault(payable(vault)).resign(coinbase);
         pendingResignAmount[vault] = masternodeStakeAmount;
         emit MasternodeResigned(vault, coinbase);
     }
 
-    function claimFromValidator(address vault) external nonReentrant {
+    /**
+     * @dev Spec v1.5 keeper: after candidateWithdrawDelay, vault calls 0x88 withdraw() and forwards principal here.
+     */
+    function processClaimableStakes(address vault) external nonReentrant {
         require(pendingResignAmount[vault] > 0, "No pending resign");
-        uint256 collected = MasternodeVault(payable(vault)).collectRewards();
-        require(collected > 0, "Nothing to collect");
-        uint256 toDeduct = collected > pendingResignAmount[vault] ? pendingResignAmount[vault] : collected;
-        totalStakedInMasternodes -= toDeduct;
-        pendingResignAmount[vault] -= toDeduct;
-        instantExitBuffer += collected;
+        (uint256 wBlock, uint256 wIndex, uint256 amount, bool ready) = IValidatorResignView(address(validator))
+            .getOwnerWithdrawal(vault);
+        require(ready && amount > 0, "Stake not claimable");
+
+        uint256 received = MasternodeVault(payable(vault)).claimStake(wBlock, wIndex);
+        require(received > 0, "claimStake failed");
+        // Accounting: vault forwards XDC via receiveVaultPrincipal()
+    }
+
+    /// @dev Principal returned from 0x88 after resign (via vault.claimStake → forward)
+    function receiveVaultPrincipal() external payable {
+        address vault = msg.sender;
+        require(pendingResignAmount[vault] > 0, "No pending resign");
+        require(vaultToCoinbase[vault] != address(0), "Unknown vault");
+
+        uint256 received = msg.value;
+        totalStakedInMasternodes -= received > masternodeStakeAmount ? masternodeStakeAmount : received;
+        pendingResignAmount[vault] = 0;
+        instantExitBuffer += received;
 
         address coinbase = vaultToCoinbase[vault];
         address operator = vaultToOperator[vault];
-        if (collected >= masternodeStakeAmount) {
-            _removeVault(vault, coinbase, operator);
-            operatorRegistry.recordResignation(coinbase);
-        }
+        _removeVault(vault, coinbase, operator);
+        operatorRegistry.recordResignation(coinbase);
+        emit StakePrincipalReturned(vault, coinbase, received);
     }
 
     function _removeVault(address vault, address coinbase, address /*operator*/) internal {
@@ -257,6 +287,7 @@ contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
 
     function harvestRewards() external nonReentrant {
         address[] memory earningVaults = new address[](activeVaults.length);
+        uint256[] memory amts = new uint256[](activeVaults.length);
         uint256 earningCount = 0;
         uint256 totalCollected = 0;
 
@@ -267,6 +298,7 @@ contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
             if (amt > 0) {
                 totalCollected += amt;
                 earningVaults[earningCount] = vault;
+                amts[earningCount] = amt;
                 earningCount++;
                 address coinbase = vaultToCoinbase[vault];
                 address operator = vaultToOperator[vault];
@@ -275,52 +307,60 @@ contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
         }
 
         if (totalCollected == 0) return;
+        _distributeHarvest(totalCollected, earningVaults, amts, earningCount);
+    }
 
+    /// @dev Per-vault operator commission ∝ actual vault earnings (spec v1.5)
+    function _distributeHarvest(
+        uint256 totalCollected,
+        address[] memory earningVaults,
+        uint256[] memory vaultAmounts,
+        uint256 earningCount
+    ) internal {
         uint256 bxdcPortion = (totalCollected * bxdcShare) / 100;
-        uint256 operatorPortion = (totalCollected * operatorShare) / 100;
         uint256 treasuryPortion = (totalCollected * treasuryShare) / 100;
 
         totalPooledXDC += bxdcPortion;
 
-        if (earningCount > 0) {
-            uint256 perVaultCommission = operatorPortion / earningCount;
-            address[] memory operatorAdmins = new address[](earningCount);
-            address[] memory coinbases = new address[](earningCount);
-            uint256[] memory amounts = new uint256[](earningCount);
-            uint256 validCount = 0;
-            uint256 totalToDeposit = 0;
+        address[] memory operatorAdmins = new address[](earningCount);
+        address[] memory coinbases = new address[](earningCount);
+        uint256[] memory commissionAmounts = new uint256[](earningCount);
+        uint256 validCount = 0;
+        uint256 totalToDeposit = 0;
 
-            for (uint256 i = 0; i < earningCount; i++) {
-                address vault = earningVaults[i];
-                address operator = vaultToOperator[vault];
-                address coinbase = vaultToCoinbase[vault];
-                if (operatorRegistry.isKYCValid(operator)) {
-                    operatorAdmins[validCount] = operator;
-                    coinbases[validCount] = coinbase;
-                    amounts[validCount] = perVaultCommission;
-                    validCount++;
-                    totalToDeposit += perVaultCommission;
-                    emit CommissionAccrued(operator, perVaultCommission);
-                } else {
-                    uint256 half = perVaultCommission / 2;
-                    totalPooledXDC += half;
-                    (bool ok, ) = payable(treasury).call{value: half}("");
-                    require(ok, "Treasury transfer failed");
-                    emit CommissionRedirected(operator, perVaultCommission, half, half);
-                }
-            }
+        for (uint256 i = 0; i < earningCount; i++) {
+            address vault = earningVaults[i];
+            uint256 vaultAmt = vaultAmounts[i];
+            uint256 perVaultCommission = (vaultAmt * operatorShare) / 100;
+            address operator = vaultToOperator[vault];
+            address coinbase = vaultToCoinbase[vault];
 
-            if (validCount > 0 && totalToDeposit > 0) {
-                address[] memory ops = new address[](validCount);
-                address[] memory cbs = new address[](validCount);
-                uint256[] memory amts = new uint256[](validCount);
-                for (uint256 i = 0; i < validCount; i++) {
-                    ops[i] = operatorAdmins[i];
-                    cbs[i] = coinbases[i];
-                    amts[i] = amounts[i];
-                }
-                revenueDistributor.depositBatch{value: totalToDeposit}(ops, cbs, amts);
+            if (operatorRegistry.isKYCValid(operator)) {
+                operatorAdmins[validCount] = operator;
+                coinbases[validCount] = coinbase;
+                commissionAmounts[validCount] = perVaultCommission;
+                validCount++;
+                totalToDeposit += perVaultCommission;
+                emit CommissionAccrued(operator, perVaultCommission);
+            } else {
+                uint256 half = perVaultCommission / 2;
+                totalPooledXDC += half;
+                (bool okT, ) = payable(treasury).call{value: half}("");
+                require(okT, "Treasury transfer failed");
+                emit CommissionRedirected(operator, perVaultCommission, half, half);
             }
+        }
+
+        if (validCount > 0 && totalToDeposit > 0) {
+            address[] memory ops = new address[](validCount);
+            address[] memory cbs = new address[](validCount);
+            uint256[] memory amtsOut = new uint256[](validCount);
+            for (uint256 i = 0; i < validCount; i++) {
+                ops[i] = operatorAdmins[i];
+                cbs[i] = coinbases[i];
+                amtsOut[i] = commissionAmounts[i];
+            }
+            revenueDistributor.depositBatch{value: totalToDeposit}(ops, cbs, amtsOut);
         }
 
         if (treasuryPortion > 0) {
@@ -328,7 +368,7 @@ contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
             require(ok, "Treasury transfer failed");
         }
 
-        emit RewardsHarvested(totalCollected, bxdcPortion, operatorPortion, treasuryPortion);
+        emit RewardsHarvested(totalCollected, bxdcPortion, (totalCollected * operatorShare) / 100, treasuryPortion);
     }
 
     function stake() external payable nonReentrant whenNotPaused {
@@ -444,16 +484,6 @@ contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
         emit WithdrawalRedeemed(batchId, msg.sender, batch.xdcAmount);
     }
 
-    receive() external payable {
-        for (uint256 i = 0; i < activeVaults.length; i++) {
-            address vault = activeVaults[i];
-            if (msg.sender == vault && pendingResignAmount[vault] > 0) {
-                uint256 amount = msg.value;
-                uint256 toDeduct = amount > pendingResignAmount[vault] ? pendingResignAmount[vault] : amount;
-                totalStakedInMasternodes -= toDeduct;
-                pendingResignAmount[vault] -= toDeduct;
-                break;
-            }
-        }
-    }
+    /// @dev Accepts native XDC from stake(), addToInstantExitBuffer, and vault forwards (claimStake).
+    receive() external payable {}
 }

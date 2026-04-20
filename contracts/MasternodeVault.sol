@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "./interfaces/IXDCValidator.sol";
+import "./interfaces/IXDCVault.sol";
 
 /**
  * @title MasternodeVault
@@ -11,18 +12,23 @@ import "./interfaces/IXDCValidator.sol";
  * the masternode owner on 0x88. Epoch rewards from 0x88 are sent directly to the
  * vault's address. StakingPool collects via collectRewards() during harvestRewards().
  *
- * After resign + 30-day unbonding, 0x88 returns the principal to this vault.
- * StakingPool calls collectRewards() again via claimFromValidator().
+ * After resign + candidateWithdrawDelay, the vault calls withdraw(blockNumber, index) on 0x88;
+ * principal is sent to this vault. StakingPool then pulls via claimStake() or collectRewards().
  *
  * No admin functions. No upgradability. Immutably owned by StakingPool.
  * ~45,000 gas to deploy via EIP-1167 clone.
  */
 contract MasternodeVault {
-    IXDCValidator private constant VALIDATOR =
-        IXDCValidator(0x0000000000000000000000000000000000000088);
+    /// @dev 0x88 on XDC mainnet; tests inject MockXDCValidator via factory implementation
+    IXDCValidator public immutable validator;
 
     address public stakingPool;
     bool private _initialized;
+
+    constructor(address _validator) {
+        require(_validator != address(0), "Invalid validator");
+        validator = IXDCValidator(_validator);
+    }
 
     modifier onlyStakingPool() {
         require(msg.sender == stakingPool, "Only StakingPool");
@@ -49,8 +55,8 @@ contract MasternodeVault {
      */
     function setupAndPropose(string calldata kycHash, address coinbase) external payable onlyStakingPool {
         require(bytes(kycHash).length > 0, "KYC hash required");
-        VALIDATOR.uploadKYC(kycHash);
-        VALIDATOR.propose{value: msg.value}(coinbase);
+        validator.uploadKYC(kycHash);
+        validator.propose{value: msg.value}(coinbase);
     }
 
     /**
@@ -58,22 +64,33 @@ contract MasternodeVault {
      * Kept for backward compatibility when vault already has KYC via ownerToCandidate.
      */
     function propose(address coinbase) external payable onlyStakingPool {
-        VALIDATOR.propose{value: msg.value}(coinbase);
+        validator.propose{value: msg.value}(coinbase);
     }
 
     /**
-     * @dev Resign coinbase from masternode. Initiates 30-day unbonding on 0x88.
-     * After the unbonding period, 0x88 returns the staked principal to this vault.
-     * Keeper must call StakingPool.claimFromValidator(vault) after unbonding completes.
+     * @dev Resign coinbase from masternode. Owner stake enters withdrawsState; candidateWithdrawDelay starts.
+     * After delay, StakingPool calls claimStake with the block/index from 0x88 (see getOwnerWithdrawal).
      */
     function resign(address coinbase) external onlyStakingPool {
-        VALIDATOR.resign(coinbase);
+        validator.resign(coinbase);
     }
 
     /**
-     * @dev Drain entire vault balance (rewards + returned principal) to StakingPool.
-     * Called during harvestRewards() for reward collection and during
-     * claimFromValidator() for principal recovery after resign unbonding.
+     * @dev Reclaim owner principal after resign + delay (spec v1.5 claimStake).
+     * Calls 0x88 withdraw(), then forwards received XDC to StakingPool.
+     */
+    function claimStake(uint256 blockNumber, uint256 index) external onlyStakingPool returns (uint256) {
+        uint256 beforeBal = address(this).balance;
+        validator.withdraw(blockNumber, index);
+        uint256 received = address(this).balance - beforeBal;
+        if (received > 0) {
+            IXDCVault(stakingPool).receiveVaultPrincipal{value: received}();
+        }
+        return received;
+    }
+
+    /**
+     * @dev Drain entire vault balance (epoch rewards) to StakingPool for harvest splitting.
      * @return amount XDC collected and sent to StakingPool
      */
     function collectRewards() external onlyStakingPool returns (uint256) {
