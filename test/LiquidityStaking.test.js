@@ -5,8 +5,9 @@ describe("XDC Liquidity Staking", function () {
     let stakingPool;
     let bxdc;
     let wxdc;
-    let withdrawalNFT;
-    let operatorRegistry;
+        let withdrawalNFT;
+        let withdrawalManager;
+        let operatorRegistry;
     let mockValidator;
     let owner;
     let user1;
@@ -35,6 +36,11 @@ describe("XDC Liquidity Staking", function () {
 
         bxdc = await ethers.getContractAt("bXDC", await stakingPool.bxdcToken());
         withdrawalNFT = await ethers.getContractAt("WithdrawalRequestNFT", await stakingPool.withdrawalNFT());
+        const WithdrawalManager = await ethers.getContractFactory("WithdrawalManager");
+        withdrawalManager = await WithdrawalManager.deploy(stakingPool.address, await stakingPool.withdrawalNFT());
+        await withdrawalManager.deployed();
+        await stakingPool.connect(owner).setWithdrawalManager(withdrawalManager.address);
+
         operatorRegistry = await ethers.getContractAt("OperatorRegistry", await stakingPool.operatorRegistry());
     });
 
@@ -110,12 +116,11 @@ describe("XDC Liquidity Staking", function () {
     });
 
     describe("赎回功能 - NFT 退出", function () {
-        it("withdrawalBatches 结构应存在", async function () {
-            // NFT 路径需 withdraw > instantExitBuffer（通常需 masternode 占用资金），此处仅验证结构
+        it("withdrawalTickets 结构应存在", async function () {
             expect(await stakingPool.nextWithdrawalBatchId()).to.equal(0);
         });
 
-        it("大额 withdraw 超出 buffer 时应铸造 NFT", async function () {
+        it("大额 withdraw 超出 buffer 时应铸造 ERC-721 并入 FIFO 队列", async function () {
             await stakingPool.connect(user1).stake({ value: ethers.utils.parseEther("100") });
             await stakingPool.connect(user1).withdraw(ethers.utils.parseEther("20")); // user1=80 bXDC
             await stakingPool.connect(user1).stake({ value: ethers.utils.parseEther("1") }); // user1=81 bXDC
@@ -124,12 +129,29 @@ describe("XDC Liquidity Staking", function () {
             await stakingPool.connect(user1).withdraw(ethers.utils.parseEther("81")); // 81 > 80 -> NFT 路径
             const batchId = await stakingPool.nextWithdrawalBatchId();
             expect(batchId).to.equal(batchIdBefore + 1);
-            expect(await withdrawalNFT.balanceOf(user1.address, batchId - 1)).to.equal(
-                ethers.utils.parseEther("81")
-            );
-            const batch = await stakingPool.withdrawalBatches(batchId - 1);
+            const ticketId = batchId - 1;
+            expect(await withdrawalNFT.ownerOf(ticketId)).to.equal(user1.address);
+            const batch = await stakingPool.withdrawalTickets(ticketId);
             expect(batch.xdcAmount).to.equal(ethers.utils.parseEther("81"));
             expect(batch.redeemed).to.equal(false);
+            expect(await withdrawalManager.queueHead()).to.equal(0);
+            expect(await withdrawalManager.nextTicketId()).to.equal(ticketId);
+        });
+
+        it("processWithdrawalQueue 在到期且缓冲足够时兑付 FIFO 队首", async function () {
+            await stakingPool.setWithdrawDelayBlocksForTesting(5);
+            await stakingPool.connect(user1).stake({ value: ethers.utils.parseEther("200") });
+            await stakingPool.setInstantExitBufferForTesting(ethers.utils.parseEther("50"));
+            await stakingPool.connect(user1).withdraw(ethers.utils.parseEther("100")); // NFT path, ~100 XDC claim
+            const ticketId = (await stakingPool.nextWithdrawalBatchId()).sub(1);
+            await ethers.provider.send("hardhat_mine", ["0x10"]);
+            await stakingPool.setInstantExitBufferForTesting(ethers.utils.parseEther("150"));
+            const balBefore = await ethers.provider.getBalance(user1.address);
+            await stakingPool.processWithdrawalQueue(1);
+            const t = await stakingPool.withdrawalTickets(ticketId);
+            expect(t.redeemed).to.equal(true);
+            expect(await withdrawalManager.queueHead()).to.equal(1);
+            expect(balBefore.lt(await ethers.provider.getBalance(user1.address))).to.equal(true);
         });
     });
 

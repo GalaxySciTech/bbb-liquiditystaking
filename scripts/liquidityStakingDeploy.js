@@ -38,6 +38,14 @@ async function main() {
 
     const bxdcAddress = await stakingPool.bxdcToken();
     const withdrawalNFTAddress = await stakingPool.withdrawalNFT();
+
+    const WithdrawalManager = await hre.ethers.getContractFactory("WithdrawalManager");
+    const withdrawalManager = await WithdrawalManager.deploy(stakingPoolAddress, withdrawalNFTAddress);
+    await withdrawalManager.deployed();
+    console.log("WithdrawalManager:", withdrawalManager.address);
+    const setWmTx = await stakingPool.setWithdrawalManager(withdrawalManager.address);
+    await setWmTx.wait();
+
     const operatorRegistryAddress = await stakingPool.operatorRegistry();
     const revenueDistributorAddress = await stakingPool.revenueDistributor();
     const masternodeManagerAddress = await stakingPool.masternodeManager();
@@ -46,6 +54,7 @@ async function main() {
     console.log("\nDeployed contracts:");
     console.log("- bXDC:", bxdcAddress);
     console.log("- WithdrawalRequestNFT:", withdrawalNFTAddress);
+    console.log("- WithdrawalManager:", withdrawalManager.address);
     console.log("- OperatorRegistry:", operatorRegistryAddress);
     console.log("- RevenueDistributor:", revenueDistributorAddress);
     console.log("- MasternodeManager:", masternodeManagerAddress);
@@ -66,6 +75,7 @@ async function main() {
             WXDC: wxdcAddress,
             bXDC: bxdcAddress,
             WithdrawalRequestNFT: withdrawalNFTAddress,
+            WithdrawalManager: withdrawalManager.address,
             OperatorRegistry: operatorRegistryAddress,
             RevenueDistributor: revenueDistributorAddress,
             MasternodeManager: masternodeManagerAddress,
