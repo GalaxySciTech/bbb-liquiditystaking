@@ -345,4 +345,44 @@ describe("XDC Liquidity Staking", function () {
             expect(await stakingPool.treasuryShare()).to.equal(3);
         });
     });
+
+    describe("Spec v1.5: resign → withdraw principal → processClaimableStakes", function () {
+        it("processClaimableStakes 通过主网式 withdraw 取回本金", async function () {
+            const stakeAmt = ethers.utils.parseEther("5000");
+            await mockValidator.setMinCandidateCap(stakeAmt);
+            await stakingPool.connect(owner).setMasternodeStakeAmount(stakeAmt);
+
+            const MASTERNODE_MANAGER_ROLE = await stakingPool.MASTERNODE_MANAGER_ROLE();
+            await stakingPool.grantRole(MASTERNODE_MANAGER_ROLE, owner.address);
+
+            await mockValidator.setCandidateWithdrawDelay(50);
+
+            const coinbase = user3.address;
+            await operatorRegistry.connect(owner).registerOperator(user1.address, 5);
+            await operatorRegistry.connect(owner).approveKYC(user1.address, "ipfs://op-kyc");
+            await operatorRegistry.connect(user1).whitelistCoinbase(coinbase);
+
+            await stakingPool.connect(owner).stake({ value: stakeAmt.add(ethers.utils.parseEther("500")) });
+            // deploy before submitKYC so _tryAutoDeployMasternode does not run mid-setup
+            await stakingPool.connect(owner).deployAndPropose(coinbase);
+            await stakingPool.connect(owner).submitKYC("ipfs://lsp");
+
+            const vault = await stakingPool.coinbaseToVault(coinbase);
+            expect(vault).to.not.equal(ethers.constants.AddressZero);
+            expect(await mockValidator.isCandidate(coinbase)).to.equal(true);
+
+            await stakingPool.connect(owner).initiateResign(coinbase);
+            expect(await stakingPool.pendingResignAmount(vault)).to.equal(stakeAmt);
+
+            await ethers.provider.send("hardhat_mine", ["0x40"]); // 64 blocks
+
+            const balBefore = await ethers.provider.getBalance(stakingPool.address);
+            await stakingPool.connect(owner).processClaimableStakes(vault);
+            const balAfter = await ethers.provider.getBalance(stakingPool.address);
+            expect(balAfter.sub(balBefore)).to.equal(stakeAmt);
+
+            expect(await stakingPool.pendingResignAmount(vault)).to.equal(0);
+            expect(await stakingPool.coinbaseToVault(coinbase)).to.equal(ethers.constants.AddressZero);
+        });
+    });
 });
