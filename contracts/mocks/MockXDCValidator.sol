@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 /**
  * @title MockXDCValidator
- * @dev Simulates 0x88: propose/vote/resign with owner stake in withdrawsState until withdraw() after delay (spec v1.5).
+ * @dev Mirrors mainnet XDCValidator (0x88) withdrawsState / resign / withdraw per verified source on XDCScan.
  */
 contract MockXDCValidator {
     uint256 public minCandidateCap = 10_000_000 ether;
@@ -27,16 +27,12 @@ contract MockXDCValidator {
 
     mapping(address => uint256) public kycHashCount;
 
-    struct OwnerWithdrawal {
-        uint256 withdrawBlockNumber;
-        uint256 withdrawIndex;
-        uint256 amount;
-        address candidate;
-        bool active;
+    struct WithdrawState {
+        mapping(uint256 => uint256) caps;
+        uint256[] blockNumbers;
     }
 
-    /// @dev Simulates withdrawsState[msg.sender] — one pending owner withdrawal at a time
-    mapping(address => OwnerWithdrawal) private _ownerWithdrawal;
+    mapping(address => WithdrawState) private _withdraws;
 
     function uploadKYC(string calldata) external {
         kycHashCount[msg.sender]++;
@@ -64,56 +60,46 @@ contract MockXDCValidator {
 
     function unvote(address _candidate, uint256 _cap) external {}
 
-    /**
-     * @dev Only the owner's (vault's) stake moves to withdrawsState; other voters unchanged (spec v1.5).
-     */
     function resign(address _candidate) external {
         require(isCandidate[_candidate], "Not candidate");
+        require(candidateOwner[_candidate] == msg.sender, "Not owner");
+
         uint256 cap = voterCap[_candidate][msg.sender];
         require(cap > 0, "No owner stake");
 
+        isCandidate[_candidate] = false;
         candidateCap[_candidate] -= cap;
         voterCap[_candidate][msg.sender] = 0;
+        candidateOwner[_candidate] = address(0);
 
-        if (candidateCap[_candidate] == 0) {
-            isCandidate[_candidate] = false;
-            candidateOwner[_candidate] = address(0);
-        }
+        uint256 withdrawBlockNumber = block.number + candidateWithdrawDelay;
+        WithdrawState storage w = _withdraws[msg.sender];
+        w.caps[withdrawBlockNumber] += cap;
+        w.blockNumbers.push(withdrawBlockNumber);
+    }
 
-        uint256 unlock = block.number + candidateWithdrawDelay;
-        _ownerWithdrawal[msg.sender] = OwnerWithdrawal({
-            withdrawBlockNumber: unlock,
-            withdrawIndex: 0,
-            amount: cap,
-            candidate: _candidate,
-            active: true
-        });
+    function getWithdrawBlockNumbers() external view returns (uint256[] memory) {
+        return _withdraws[msg.sender].blockNumbers;
+    }
+
+    function getWithdrawCap(uint256 _blockNumber) external view returns (uint256) {
+        return _withdraws[msg.sender].caps[_blockNumber];
     }
 
     function withdraw(uint256 _blockNumber, uint256 _index) external {
-        OwnerWithdrawal storage w = _ownerWithdrawal[msg.sender];
-        require(w.active, "No pending withdraw");
-        require(block.number >= w.withdrawBlockNumber, "Delay not elapsed");
-        require(_blockNumber == w.withdrawBlockNumber && _index == w.withdrawIndex, "Bad key");
+        require(_blockNumber > 0, "bad block");
+        require(block.number >= _blockNumber, "not yet");
+        WithdrawState storage w = _withdraws[msg.sender];
+        require(w.caps[_blockNumber] > 0, "no cap");
+        require(_index < w.blockNumbers.length, "bad index");
+        require(w.blockNumbers[_index] == _blockNumber, "block index mismatch");
 
-        uint256 amt = w.amount;
-        delete _ownerWithdrawal[msg.sender];
+        uint256 cap = w.caps[_blockNumber];
+        delete w.caps[_blockNumber];
+        delete w.blockNumbers[_index];
 
-        (bool ok, ) = payable(msg.sender).call{value: amt}("");
+        (bool ok, ) = payable(msg.sender).call{value: cap}("");
         require(ok, "Withdraw transfer failed");
-    }
-
-    function getOwnerWithdrawal(address owner)
-        external
-        view
-        returns (uint256 withdrawBlockNumber, uint256 withdrawIndex, uint256 amount, bool ready)
-    {
-        OwnerWithdrawal storage w = _ownerWithdrawal[owner];
-        if (!w.active) return (0, 0, 0, false);
-        withdrawBlockNumber = w.withdrawBlockNumber;
-        withdrawIndex = w.withdrawIndex;
-        amount = w.amount;
-        ready = block.number >= w.withdrawBlockNumber;
     }
 
     function getCandidateOwner(address _candidate) external view returns (address) {

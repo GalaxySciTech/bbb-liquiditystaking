@@ -13,7 +13,7 @@ import "./interfaces/IXDCVault.sol";
  * vault's address. StakingPool collects via collectRewards() during harvestRewards().
  *
  * After resign + candidateWithdrawDelay, the vault calls withdraw(blockNumber, index) on 0x88;
- * principal is sent to this vault. StakingPool then pulls via claimStake() or collectRewards().
+ * principal is sent to this vault. StakingPool then pulls via claimFirstReadyPrincipal() or collectRewards().
  *
  * No admin functions. No upgradability. Immutably owned by StakingPool.
  * ~45,000 gas to deploy via EIP-1167 clone.
@@ -69,24 +69,46 @@ contract MasternodeVault {
 
     /**
      * @dev Resign coinbase from masternode. Owner stake enters withdrawsState; candidateWithdrawDelay starts.
-     * After delay, StakingPool calls claimStake with the block/index from 0x88 (see getOwnerWithdrawal).
+     * After delay, StakingPool calls claimFirstReadyPrincipal() which uses getWithdrawBlockNumbers / getWithdrawCap on 0x88.
      */
     function resign(address coinbase) external onlyStakingPool {
         validator.resign(coinbase);
     }
 
     /**
-     * @dev Reclaim owner principal after resign + delay (spec v1.5 claimStake).
-     * Calls 0x88 withdraw(), then forwards received XDC to StakingPool.
+     * @dev Read pending withdraw keys from mainnet XDCValidator (msg.sender = this vault).
      */
-    function claimStake(uint256 blockNumber, uint256 index) external onlyStakingPool returns (uint256) {
-        uint256 beforeBal = address(this).balance;
-        validator.withdraw(blockNumber, index);
-        uint256 received = address(this).balance - beforeBal;
-        if (received > 0) {
-            IXDCVault(stakingPool).receiveVaultPrincipal{value: received}();
+    function getPendingWithdrawBlockNumbers() external view returns (uint256[] memory) {
+        return validator.getWithdrawBlockNumbers();
+    }
+
+    /**
+     * @dev Cap at unlock block for this vault (mainnet getWithdrawCap).
+     */
+    function getWithdrawCapAt(uint256 withdrawBlockNumber) external view returns (uint256) {
+        return validator.getWithdrawCap(withdrawBlockNumber);
+    }
+
+    /**
+     * @dev After candidateWithdrawDelay: first eligible withdraw(blockNumber, index), forward principal to StakingPool.
+     * Matches XDCValidator.withdraw indexing (blockNumbers[index] == blockNumber).
+     */
+    function claimFirstReadyPrincipal() external onlyStakingPool returns (uint256 received) {
+        uint256[] memory bns = validator.getWithdrawBlockNumbers();
+        for (uint256 i = 0; i < bns.length; i++) {
+            uint256 bn = bns[i];
+            if (bn == 0 || block.number < bn) continue;
+            uint256 cap = validator.getWithdrawCap(bn);
+            if (cap == 0) continue;
+            uint256 beforeBal = address(this).balance;
+            validator.withdraw(bn, i);
+            received = address(this).balance - beforeBal;
+            if (received > 0) {
+                IXDCVault(stakingPool).receiveVaultPrincipal{value: received}();
+            }
+            return received;
         }
-        return received;
+        return 0;
     }
 
     /**

@@ -27,5 +27,11 @@ interface IXDCValidator {
     /// @dev KYC verification - returns count of valid KYC hashes for address
     /// Note: XDCValidator uses KYCString[addr]; if getHashCount not available, use adapter
     function getHashCount(address _addr) external view returns (uint256);
+
+    /// @dev Mainnet XDCValidator (0x88): pending withdraw unlock blocks for msg.sender
+    function getWithdrawBlockNumbers() external view returns (uint256[] memory);
+
+    /// @dev Mainnet: cap scheduled at withdrawBlockNumber for msg.sender
+    function getWithdrawCap(uint256 _blockNumber) external view returns (uint256);
 }
 

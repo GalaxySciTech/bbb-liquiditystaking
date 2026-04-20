@@ -347,7 +347,7 @@ describe("XDC Liquidity Staking", function () {
     });
 
     describe("Spec v1.5: resign → withdraw principal → processClaimableStakes", function () {
-        it("vault claimStake 后本金回到池并完成摘牌", async function () {
+        it("processClaimableStakes 通过主网式 withdraw 取回本金", async function () {
             const stakeAmt = ethers.utils.parseEther("5000");
             await mockValidator.setMinCandidateCap(stakeAmt);
             await stakingPool.connect(owner).setMasternodeStakeAmount(stakeAmt);

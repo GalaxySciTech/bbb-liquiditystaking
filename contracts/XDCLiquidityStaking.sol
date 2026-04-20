@@ -7,7 +7,6 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./interfaces/IXDCValidator.sol";
-import "./interfaces/IValidatorResignView.sol";
 import "./WXDC.sol";
 import "./MasternodeVault.sol";
 import "./MasternodeVaultFactory.sol";
@@ -241,20 +240,15 @@ contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
     }
 
     /**
-     * @dev Spec v1.5 keeper: after candidateWithdrawDelay, vault calls 0x88 withdraw() and forwards principal here.
+     * @dev Spec v1.5 keeper: uses mainnet 0x88 getWithdrawBlockNumbers + getWithdrawCap (vault forwards staticcalls).
      */
     function processClaimableStakes(address vault) external nonReentrant {
         require(pendingResignAmount[vault] > 0, "No pending resign");
-        (uint256 wBlock, uint256 wIndex, uint256 amount, bool ready) = IValidatorResignView(address(validator))
-            .getOwnerWithdrawal(vault);
-        require(ready && amount > 0, "Stake not claimable");
-
-        uint256 received = MasternodeVault(payable(vault)).claimStake(wBlock, wIndex);
-        require(received > 0, "claimStake failed");
-        // Accounting: vault forwards XDC via receiveVaultPrincipal()
+        uint256 received = MasternodeVault(payable(vault)).claimFirstReadyPrincipal();
+        require(received > 0, "Nothing claimable");
     }
 
-    /// @dev Principal returned from 0x88 after resign (via vault.claimStake → forward)
+    /// @dev Principal returned from 0x88 after resign (vault withdraw → forward)
     function receiveVaultPrincipal() external payable {
         address vault = msg.sender;
         require(pendingResignAmount[vault] > 0, "No pending resign");
@@ -484,6 +478,6 @@ contract XDCLiquidityStaking is AccessControl, ReentrancyGuard, Pausable {
         emit WithdrawalRedeemed(batchId, msg.sender, batch.xdcAmount);
     }
 
-    /// @dev Accepts native XDC from stake(), addToInstantExitBuffer, and vault forwards (claimStake).
+    /// @dev Accepts native XDC from stake(), addToInstantExitBuffer, and vault forwards (principal after withdraw).
     receive() external payable {}
 }
